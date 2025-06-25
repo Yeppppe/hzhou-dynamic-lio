@@ -164,8 +164,10 @@ void saveCutCloud(std::string &str, pcl::PointCloud<pcl::PointXYZINormal>::Ptr &
     pcd_writer.writeBinary(str, *p_cloud_temp);
 }
 
+//* 输入：点云以及降采样体素
 void subSampleFrame(std::vector<point3D> &frame, double size_voxel)
 {
+    //* 创建一个哈希表作为体素网格，键类型voxel结构体  值是落在该体素内的所有点   std::hash<voxel>作为哈希函数计算体素索引的哈希值
     std::tr1::unordered_map<voxel, std::vector<point3D>, std::hash<voxel>> grid;
     for (int i = 0; i < (int) frame.size(); i++) {
         auto kx = static_cast<short>(frame[i].point[0] / size_voxel);
@@ -173,13 +175,13 @@ void subSampleFrame(std::vector<point3D> &frame, double size_voxel)
         auto kz = static_cast<short>(frame[i].point[2] / size_voxel);
         grid[voxel(kx, ky, kz)].push_back(frame[i]);
     }
-    frame.resize(0);
+    frame.resize(0);   //* 清除原始点云向量
     int step = 0;
     for(const auto &n: grid)
     {
         if(n.second.size() > 0)
         {
-            frame.push_back(n.second[0]);
+            frame.push_back(n.second[0]);          //* 只取每个体素第一个搜索到的点放入frame中
             step++;
         }
     }
@@ -219,7 +221,8 @@ void distortFrameByConstant(std::vector<point3D> &points, std::vector<imuState> 
     {
         time_point = time_sweep_begin + (*iter).relative_time / 1000.0;
 
-        if (time_point - time_sweep_begin < 1e-6) time_point = time_sweep_begin + 1e-6;
+        //* 确保时间点不会过于接近边界
+        if (time_point - time_sweep_begin < 1e-6) time_point = time_sweep_begin + 1e-6;     
         if (time_sweep_end - time_point < 1e-6) time_point = time_sweep_end - 1e-6;
 
         assert(time_point > time_sweep_begin - 1e-6 && time_point < time_sweep_end + 1e-6);
@@ -227,6 +230,7 @@ void distortFrameByConstant(std::vector<point3D> &points, std::vector<imuState> 
         double alpha_time = (time_point - time_sweep_begin) / (time_sweep_end - time_sweep_begin);
         assert(alpha_time >= 0 && alpha_time <= 1);
 
+        //!  使用球面线性插值的方法(一知半解)
         Eigen::Quaterniond quat_alpha = quat_begin.slerp(alpha_time, quat_end);
         Eigen::Vector3d trans_alpha = (1.0 - alpha_time) * trans_begin + alpha_time * trans_end;
 
@@ -278,6 +282,7 @@ void distortFrameByImu(std::vector<point3D> &points, std::vector<imuState> &imu_
 
             if (time_point > time_imu_begin - 1e-6 && time_point < time_imu_end + 1e-6)
             {
+                //* 处理边界情况，保证不会距离太近
                 if (fabs(time_point - time_imu_begin) < 1e-6) time_point = time_imu_begin + 1e-6;
                 if (fabs(time_point - time_imu_end) < 1e-6) time_point = time_imu_end - 1e-6;
 

@@ -60,8 +60,11 @@ lioOptimization::lioOptimization()
     pub_odom = nh.advertise<nav_msgs::Odometry>("/Odometry_after_opt", 5);                     //* 发布优化后的位姿
     pub_path = nh.advertise<nav_msgs::Path>("/path", 5);                                       //* 发布路径
 
-    sub_cloud_ori = nh.subscribe<sensor_msgs::PointCloud2>(lidar_topic, 20, &lioOptimization::standardCloudHandler, this);
-    sub_imu_ori = nh.subscribe<sensor_msgs::Imu>(imu_topic, 500, &lioOptimization::imuHandler, this);
+    //* 回调函数，填充了time_buffer和lidar_buffer
+    sub_cloud_ori = nh.subscribe<sensor_msgs::PointCloud2>(lidar_topic, 20, &lioOptimization::standardCloudHandler, this);    //* 雷达订阅回调函数20是缓存队列大小，如果队列满了，旧的消息会被丢弃
+    
+    //* 把imu数据连带时间戳存入imu_buffer 并将当前时间记录为last_time_imu
+    sub_imu_ori = nh.subscribe<sensor_msgs::Imu>(imu_topic, 500, &lioOptimization::imuHandler, this);       //* imu订阅回调函数
 
     path.header.stamp = ros::Time::now();
     path.header.frame_id ="camera_init";
@@ -81,7 +84,7 @@ void lioOptimization::readParameters()
     // common
     nh.param<std::string>("common/lidar_topic", lidar_topic, "/points_raw");
 	nh.param<std::string>("common/imu_topic", imu_topic, "/imu_raw");
-    nh.param<int>("common/point_filter_num", para_int, 1);  cloud_pro->setPointFilterNum(para_int);
+    nh.param<int>("common/point_filter_num", para_int, 1);  cloud_pro->setPointFilterNum(para_int);  
     nh.param<std::vector<double>>("common/gravity_acc", v_G, std::vector<double>());
     nh.param<bool>("debug_output", debug_output, false);
     nh.param<std::string>("output_path", output_path, "");
@@ -195,7 +198,7 @@ void lioOptimization::initialValue()
 
     // loop closing
     loop_map.reset(new pcl::PointCloud<pcl::PointXYZI>());
-    pub_loop_map = nh.advertise<sensor_msgs::PointCloud2>("/loop_map", 2);
+    pub_loop_map = nh.advertise<sensor_msgs::PointCloud2>("/loop_map", 2);    //* 发布回环地图
     // loop closing
 }
 
@@ -292,28 +295,35 @@ size_t lioOptimization::mapSize(const voxelHashMap &map)
 
 void lioOptimization::standardCloudHandler(const sensor_msgs::PointCloud2::ConstPtr &msg) 
 {
-    double sample_size = index_frame < options.init_num_frames ? options.init_voxel_size : options.voxel_size;
+    //* 如果是初始化节点采用较小的降采样体素，获取更精细点云。 正常运行阶段使用较大体素尺寸，减小计算负担
+    double sample_size = index_frame < options.init_num_frames ? options.init_voxel_size : options.voxel_size;   //* init_voxel_size = 0.2  voxel_size = 0.5
 
     assert(msg->header.stamp.toSec() > last_time_lidar);
     
     std::vector<point3D> v_point_cloud;
     double dt_offset;
 
-    cloud_pro->process(msg, v_point_cloud, dt_offset);
+    
+    cloud_pro->process(msg, v_point_cloud, dt_offset);   //* 输出去除降采样后的有效点(包括地面点) dt_offset是一帧点云总共的时间戳
 
+    //* 随机打乱点云顺序
     boost::mt19937_64 g;
     std::shuffle(v_point_cloud.begin(), v_point_cloud.end(), g);
 
+    //* 构建体素降采样
     subSampleFrame(v_point_cloud, sample_size);
 
+    //* 再次打乱
     std::shuffle(v_point_cloud.begin(), v_point_cloud.end(), g);
 
     lidar_buffer.push(v_point_cloud);
+    //* time_buffer存储了当前点云的第一个点时间以及当前扫描帧持续时间
     time_buffer.push(std::make_pair(msg->header.stamp.toSec(), dt_offset / (double)1000.0));
 
     assert(msg->header.stamp.toSec() > last_time_lidar);
     last_time_lidar = msg->header.stamp.toSec();
 }
+
 
 void lioOptimization::imuHandler(const sensor_msgs::Imu::ConstPtr &msg)
 {
@@ -341,14 +351,17 @@ std::vector<std::pair<std::pair<std::vector<sensor_msgs::ImuConstPtr>, std::vect
 
     while (true)
     {
+        //* 检查imu和雷达数据缓冲区是否充足
         if(imu_buffer.size() < 60 || lidar_buffer.size() < 2 || time_buffer.size() < 2)
             return measurements;
 
+        //* imu时间戳必须能够覆盖 雷达时间戳
         if (!(imu_buffer.back()->header.stamp.toSec() > time_buffer.front().first + time_buffer.front().second))
         {
             return measurements;
         }
 
+        //* 如果雷达最早一帧的时间戳早于imu 则删除一雷达数据
         if (!(imu_buffer.front()->header.stamp.toSec() < time_buffer.front().first + time_buffer.front().second))
         {
             time_buffer.pop();
@@ -360,11 +373,12 @@ std::vector<std::pair<std::pair<std::vector<sensor_msgs::ImuConstPtr>, std::vect
             continue;
         }
 
-        double timestamp = time_buffer.front().first + time_buffer.front().second;
-        double timestamp_begin = time_buffer.front().first;
+        double timestamp = time_buffer.front().first + time_buffer.front().second;    //* 雷达帧开始时间+持续时间
+        double timestamp_begin = time_buffer.front().first;                       
         double timestamp_offset = time_buffer.front().second;
         time_buffer.pop();
 
+        //* 检查当前帧与下一帧开始时间是否明显有差异，如果有明显差异，则以两帧开始时间之差作为持续时间
         if (fabs(timestamp_begin - time_buffer.front().first) > 1e-5)
         {
             if (time_buffer.front().first - timestamp_begin - timestamp_offset > 1e-5)
@@ -403,6 +417,7 @@ std::vector<std::pair<std::pair<std::vector<sensor_msgs::ImuConstPtr>, std::vect
     return measurements;
 }
 
+//* 用来计算一帧雷达每个点的时间戳
 void lioOptimization::makePointTimestamp(std::vector<point3D> &sweep, double time_sweep_begin, double time_sweep_end)
 {
     //* 如果激光雷达数据的时间戳是给定的，则不进行时间戳的计算
@@ -412,7 +427,7 @@ void lioOptimization::makePointTimestamp(std::vector<point3D> &sweep, double tim
     }
     else
     {
-        double delta_t = time_sweep_end - time_sweep_begin;
+        double delta_t = time_sweep_end - time_sweep_begin;    //* 当前扫描帧的事件跨度
 
         std::vector<point3D>::iterator iter = sweep.begin();
 
@@ -435,10 +450,10 @@ void lioOptimization::makePointTimestamp(std::vector<point3D> &sweep, double tim
 //* 构建点云帧的核心函数
 cloudFrame* lioOptimization::buildFrame(std::vector<point3D> &const_frame, state *cur_state, double timestamp_begin, double timestamp_offset)
 {
-    std::vector<point3D> frame(const_frame);
+    std::vector<point3D> frame(const_frame);    //* 创建输入数据的脚本，避免更改原始数据
 
-    double offset_begin = 0;
-    double offset_end = timestamp_offset;
+    double offset_begin = 0;                    //* 相对于扫描开始的偏移
+    double offset_end = timestamp_offset;       //* 相对于扫描结束的偏移
 
     double dt_offset = 0;
 
@@ -451,16 +466,17 @@ cloudFrame* lioOptimization::buildFrame(std::vector<point3D> &const_frame, state
     //* 如果当前帧是第一帧或第二帧，则将每个点的时间戳设置为1.0 不考虑运动补偿
     if (index_frame <= 2) {
         for (auto &point_temp : frame)
-            point_temp.alpha_time = 1.0;
+            point_temp.alpha_time = 1.0;     //* alpha_time 是当前点到第一个点的事件占一帧扫描的百分比
     }
 
     //* 如果运动补偿模式为恒定速度，则使用恒定速度模型进行运动补偿
+    //! 同时还将雷达坐标系下的点云转换到了imu坐标系下，然后根据imu状态将点云转换到世界坐标系，也就是此时的frame进入是是雷达坐标系，输出就变成了世界坐标系。
     if (options.motion_compensation == CONSTANT_VELOCITY)
         distortFrameByConstant(frame, imu_states, timestamp_begin, R_imu_lidar, t_imu_lidar);
     else if (options.motion_compensation == IMU)
         distortFrameByImu(frame, imu_states, timestamp_begin, R_imu_lidar, t_imu_lidar);
 
-    //* 将点云从IMU坐标系转换到激光雷达坐标系
+    //* 将点云从世界坐标系转换回雷达坐标系
     transformAllImuPoint(frame, imu_states, R_imu_lidar, t_imu_lidar);
 
     if (index_frame > 2) {
@@ -478,6 +494,7 @@ cloudFrame* lioOptimization::buildFrame(std::vector<point3D> &const_frame, state
         }
     }
 
+    //! 这部分代码有问题吧 应该使用point_temp来初始化p_frame进而构建all_cloud_frame,应该是个错误
     cloudFrame *p_frame = new cloudFrame(const_frame, cur_state);
     p_frame->time_sweep_begin = timestamp_begin;
     p_frame->time_sweep_end = timestamp_begin + timestamp_offset;
@@ -507,7 +524,7 @@ void lioOptimization::stateInitialization(state *cur_state)
         if (options.initialization == INIT_CONSTANT_VELOCITY)
         {
             //* 使用恒定速度模型
-            //* 通过当前帧和上一帧的旋转差delta_R     q_next_end = R2 * delta_R：预测下一帧的旋转
+            //* 预测下一帧的旋转： 相对旋转 = 当前帧旋转 × 前一帧旋转的逆     下一帧旋转 = 相对旋转 * 前一帧旋转
             Eigen::Quaterniond q_next_end = all_cloud_frame[all_cloud_frame.size() - 1]->p_state->rotation * 
                     all_cloud_frame[all_cloud_frame.size() - 2]->p_state->rotation.inverse() * all_cloud_frame[all_cloud_frame.size() - 1]->p_state->rotation;
 
@@ -523,12 +540,12 @@ void lioOptimization::stateInitialization(state *cur_state)
         }
         else if (options.initialization == INIT_IMU)
         {
-            if (initial_flag)
+            if (initial_flag)   //* 初始化完成则直接使用imu的状态
             {
                 cur_state->rotation = eskf_pro->getRotation();
                 cur_state->translation = eskf_pro->getTranslation();
             }
-            else
+            else         //* 初始化未完成，则仍然使用恒速模型
             {
                 Eigen::Quaterniond q_next_end = all_cloud_frame[all_cloud_frame.size() - 1]->p_state->rotation * 
                         all_cloud_frame[all_cloud_frame.size() - 2]->p_state->rotation.inverse() * all_cloud_frame[all_cloud_frame.size() - 1]->p_state->rotation;
@@ -549,7 +566,7 @@ void lioOptimization::stateInitialization(state *cur_state)
             cur_state->translation = all_cloud_frame[all_cloud_frame.size() - 1]->p_state->translation;
         }
     }
-    else
+    else   //* 大于第三帧
     {
         if (options.initialization == INIT_CONSTANT_VELOCITY)  //* 使用恒定速度模型
         {
@@ -801,10 +818,12 @@ void lioOptimization::addDecidedPointsToTrueMap(double voxel_size, int max_num_p
     }
 }
 
+//* 06251806
 void lioOptimization::process(std::vector<point3D> &const_frame, double timestamp_begin, double timestamp_offset)
 {
     state *cur_state = new state();
 
+    //* 根据历史数据或IMU初始预测当前状态cur_state
     stateInitialization(cur_state);
 
     //* 构建点云帧
@@ -990,14 +1009,15 @@ void lioOptimization::publish_odometry(const ros::Publisher & pubOdomAftMapped, 
 
 void lioOptimization::run()
 {
-    //* 返回数据类型 1.IMU数据 2.激光雷达数据 3.第一个点的时间戳 4.时间戳偏移 （其中1.2组合成一个数据对，3.4组合成一个数据对）
+    //* 返回数据类型 1.IMU数据 2.激光雷达数据 3.第一个点的时间戳 4.时间戳偏移 （其中1.2组合成一个数据对，3.4组合成一个数据对） <12,34>在组成一个数据  很多个这样的数据存入vector中
+    //* measurements表示一帧雷达与多帧imu的组合数据
     std::vector<std::pair<std::pair<std::vector<sensor_msgs::ImuConstPtr>, std::vector<point3D>>, std::pair<double, double>>> measurements = getMeasurements();
 
     if(measurements.size() == 0) return;
 
     for (auto &measurement : measurements)
     {
-        auto cut_sweep = measurement.first.second;
+        auto cut_sweep = measurement.first.second;   //* 先imu 后雷达 cut_sweep表示一帧雷达数据
 
         double time_frame = measurement.second.first + measurement.second.second;     //* time_frame是雷达扫描最后一个点的时间戳
         double dx = 0, dy = 0, dz = 0, rx = 0, ry = 0, rz = 0;
@@ -1010,12 +1030,12 @@ void lioOptimization::run()
             {
                 double time_imu = imu_msg->header.stamp.toSec();
 
-                if (time_imu <= time_frame)
+                if (time_imu <= time_frame)           //* measurment打包进来的数据 第一帧imu一定早于雷达第一个点的时间戳
                 { 
                     if(current_time < 0)
                         current_time = measurement.second.first;
 
-                    current_time = time_imu;
+                    current_time = time_imu;      //* 这部分应该是写的有点问题，应该放在if上面？
                     dx = imu_msg->linear_acceleration.x;
                     dy = imu_msg->linear_acceleration.y;
                     dz = imu_msg->linear_acceleration.z;·
@@ -1064,6 +1084,7 @@ void lioOptimization::run()
 
             imu_state_temp.timestamp = current_time;
 
+            //* 在世界坐标系下的imu
             imu_state_temp.un_acc = eskf_pro->getRotation().toRotationMatrix() * (eskf_pro->getLastAcc() - eskf_pro->getBa());
             imu_state_temp.un_gyr = eskf_pro->getLastGyr() - eskf_pro->getBg();
             imu_state_temp.trans = eskf_pro->getTranslation();
@@ -1077,6 +1098,7 @@ void lioOptimization::run()
         {
             double time_imu = imu_msg->header.stamp.toSec();
 
+            //* time_frame是雷达扫描最后一个点的时间戳
             if (time_imu <= time_frame)
             { 
                 if(current_time < 0)
@@ -1101,8 +1123,11 @@ void lioOptimization::run()
                 imu_state_temp.un_gyr = 0.5 * (eskf_pro->getLastGyr() + Eigen::Vector3d(rx, ry, rz)) - eskf_pro->getBg();
 
                 dt_sum = dt_sum + dt;
+
+                //* 初步更新姿态(p r) 以及 协方差矩阵 dt为两帧imu之间的状态
                 eskf_pro->predict(dt, Eigen::Vector3d(dx, dy, dz), Eigen::Vector3d(rx, ry, rz));
 
+                //* 初步更新后的位姿以及速度
                 imu_state_temp.trans = eskf_pro->getTranslation();
                 imu_state_temp.quat = eskf_pro->getRotation();
                 imu_state_temp.vel = eskf_pro->getVelocity();

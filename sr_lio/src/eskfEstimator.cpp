@@ -46,10 +46,12 @@ void eskfEstimator::tryInit(const std::vector<std::pair<double, std::pair<Eigen:
     initialization(imu_meas);
 
     //* 如果IMU数据数量大于最小初始化数量，并且最后一个IMU数据的时间戳减去第一个IMU数据的时间戳大于最小初始化时间，则进行初始化
+    //* num_init_meas是在initialization函数中，每增加一个imu样本计算数据 就++一次；同时确保数据时间跨度足够长
     if (num_init_meas > MIN_INI_COUNT && imu_meas.back().first - time_first_imu > MIN_INI_TIME)
     {
-        acc_cov *= std::pow(G_norm / mean_acc.norm(), 2);
+        acc_cov *= std::pow(G_norm / mean_acc.norm(), 2);  //* 根据重力补偿加速度协方差比例
 
+        //* 噪声阈值判断
         if (gyr_cov.norm() > MAX_GYR_VAR)
         {
             LOG(ERROR) << "Too large noise of gyroscope measurements. " << gyr_cov.norm() << " > " << MAX_GYR_VAR;
@@ -64,11 +66,13 @@ void eskfEstimator::tryInit(const std::vector<std::pair<double, std::pair<Eigen:
 
         initial_flag = true;
 
-        gyr_cov = gyr_cov_scale;
+        //! 直接赋值为常量了？ 那前面计算出来的算什么？
+        gyr_cov = gyr_cov_scale;  
         acc_cov = acc_cov_scale;
 
+        //* 静止状态下 陀螺仪应该角速度为零，因此 此时的平均值就是偏置
         Eigen::Vector3d init_bg = mean_gyr;
-        Eigen::Vector3d init_gravity = mean_acc / mean_acc.norm() * G_norm;
+        Eigen::Vector3d init_gravity = mean_acc / mean_acc.norm() * G_norm;  //* 取实际测得中立的方向与实际物理重力加速度的大小
     
         setBg(init_bg);
         setGravity(init_gravity);
@@ -77,6 +81,7 @@ void eskfEstimator::tryInit(const std::vector<std::pair<double, std::pair<Eigen:
         covariance.block<3, 3>(12, 12) *= 0.0001;
         covariance.block<2, 2>(15, 15) *= 0.00001;
 
+        //* 初始化噪声：加速度协方差，角速度协方差，加速度偏置协方差，角速度偏置协方差 
         initializeNoise();
 
         ROS_INFO("IMU Initialization Done.");
@@ -102,6 +107,7 @@ void eskfEstimator::initialization(const std::vector<std::pair<double, std::pair
         mean_acc = imu_meas.front().second.second;
     }
 
+    //* 增量式计算角速度和加速度的均值和协方差 
     for (const auto &imu : imu_meas)
     {
         mean_gyr += (imu.second.first - mean_gyr) / num_init_meas;
@@ -116,8 +122,8 @@ void eskfEstimator::initialization(const std::vector<std::pair<double, std::pair
         num_init_meas++;
     }
 
-    gyr_0 = imu_meas.back().second.first;
-    acc_0 = imu_meas.back().second.second;
+    gyr_0 = imu_meas.back().second.first;       //* 记录最后一条imu数据的角速度和加速度 作为gyr_0和acc_0的初始值
+    acc_0 = imu_meas.back().second.second;       
 }
 
 void eskfEstimator::initializeNoise()
@@ -166,6 +172,7 @@ void eskfEstimator::setCovariance(const Eigen::Matrix<double, 17, 17> &covarianc
 
 Eigen::Matrix<double, 17, 17> eskfEstimator::getCovariance() { return covariance; }
 
+//* 初步更新姿态 以及 协方差矩阵
 void eskfEstimator::predict(double dt_, const Eigen::Vector3d &acc_1_, const Eigen::Vector3d &gyr_1_)
 {
     dt = dt_;
