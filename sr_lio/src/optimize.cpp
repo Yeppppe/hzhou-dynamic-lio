@@ -14,7 +14,7 @@
 // utility
 #include "utility.h"
 #include "parameters.h"
-
+//* cur_icp_options：icp选项   voxel_map_temp：体素化地图    keypoints：降采样后的关键点   plane_residuals：平面残差    p_frame
 optimizeSummary lioOptimization::buildPlaneResiduals(const icpOptions &cur_icp_options, voxelHashMap &voxel_map_temp, std::vector<point3D> &keypoints, 
     std::vector<planeParam> &plane_residuals, cloudFrame *p_frame, double &loss_sum)
 {
@@ -22,6 +22,7 @@ optimizeSummary lioOptimization::buildPlaneResiduals(const icpOptions &cur_icp_o
     const int kMinNumNeighbors = cur_icp_options.min_number_neighbors;
     const int kThresholdCapacity = p_frame->frame_id < cur_icp_options.init_num_frames ? 1 : cur_icp_options.threshold_voxel_occupancy;
 
+    //* 查询上一帧和当前帧的状态 以及当前帧的旋转四元数和平移向量
     state *last_state = all_cloud_frame[p_frame->id - 1]->p_state;
     state *current_state = p_frame->p_state;
     Eigen::Quaterniond end_quat = Eigen::Quaterniond(current_state->rotation);
@@ -36,14 +37,15 @@ optimizeSummary lioOptimization::buildPlaneResiduals(const icpOptions &cur_icp_o
             R = end_quat.normalized().toRotationMatrix();
             t = end_t;
 
-            keypoint.point = R * (R_imu_lidar * keypoint.raw_point + t_imu_lidar) + t;
+            keypoint.point = R * (R_imu_lidar * keypoint.raw_point + t_imu_lidar) + t;  //* 先从雷达坐标系转换为imu坐标系，再转换到世界坐标系
         }
     };
 
     auto estimatePointNeighborhood = [&](std::vector<globalPoint> &vector_neighbors, Eigen::Vector3d &location, double &planarity_weight)
     {
+        //* 计算vector_neighbors点云分布情况
         auto neighborhood = computeNeighborhoodDistribution(vector_neighbors);
-        planarity_weight = std::pow(neighborhood.a2D, cur_icp_options.power_planarity);
+        planarity_weight = std::pow(neighborhood.a2D, cur_icp_options.power_planarity);   //* 将获取的分布系数平方处理
 
         if (neighborhood.normal.dot(last_state->translation - location) < 0) {
             neighborhood.normal = -1.0 * neighborhood.normal;
@@ -53,7 +55,7 @@ optimizeSummary lioOptimization::buildPlaneResiduals(const icpOptions &cur_icp_o
 
     double lambda_weight = std::abs(cur_icp_options.weight_alpha);
     double lambda_neighborhood = std::abs(cur_icp_options.weight_neighborhood);
-    const double kMaxPointToPlane = cur_icp_options.max_dist_to_plane_icp;
+    const double kMaxPointToPlane = cur_icp_options.max_dist_to_plane_icp;   //* 配置点到平面最大距离为0.3
     const double sum = lambda_weight + lambda_neighborhood;
 
     lambda_weight /= sum;
@@ -62,6 +64,7 @@ optimizeSummary lioOptimization::buildPlaneResiduals(const icpOptions &cur_icp_o
     int num_residuals = 0;
     int num_keypoints = keypoints.size();
 
+    //* 将以雷达为坐标系的点转换到世界坐标系当中
     transformKeypoints();
 
     for (int k = 0; k < num_keypoints; k++) {
@@ -69,11 +72,13 @@ optimizeSummary lioOptimization::buildPlaneResiduals(const icpOptions &cur_icp_o
         auto &raw_point = keypoint.raw_point;
 
         std::vector<voxel> voxels;
+        //* vector_neighbors是与当前keypoint.point最近的一系列点
         auto vector_neighbors = searchNeighbors(voxel_map_temp, keypoint.point,
                                                  nb_voxels_visited, cur_icp_options.size_voxel_map,
                                                  cur_icp_options.max_number_neighbors, kThresholdCapacity,
                                                  cur_icp_options.estimate_normal_from_neighborhood ? nullptr : &voxels);
 
+        //* 要求邻域内找到的最临近点足够多
         if (vector_neighbors.size() < kMinNumNeighbors)
             continue;
 
@@ -83,6 +88,7 @@ optimizeSummary lioOptimization::buildPlaneResiduals(const icpOptions &cur_icp_o
 
         auto neighborhood = estimatePointNeighborhood(vector_neighbors, location, weight);
 
+        //* 平面度越大，距离越近，权重越高
         weight = lambda_weight * weight + lambda_neighborhood * std::exp(-(vector_neighbors[0].getPosition() -
                  keypoint.point).norm() / (kMaxPointToPlane * kMinNumNeighbors));
 
@@ -156,6 +162,7 @@ optimizeSummary lioOptimization::updateIEKF(const icpOptions &cur_icp_options, v
         if (summary.success == false)
             return summary;
 
+        //* 根据残差数量更新观测矩阵
         int num_plane_residuals = plane_residuals.size();
 
         Eigen::Matrix<double, Eigen::Dynamic, 6> H_x;
@@ -170,6 +177,7 @@ optimizeSummary lioOptimization::updateIEKF(const icpOptions &cur_icp_options, v
             h.block<1, 1>(i, 0) = Eigen::Matrix<double, 1, 1>(plane_residuals[i].distance * plane_residuals[i].weight);
         }
 
+        //* 
         Eigen::Vector3d d_p = eskf_pro->getTranslation() - p_predict;
         Eigen::Quaterniond d_q = q_predict.inverse() * eskf_pro->getRotation();
         Eigen::Vector3d d_so3 = numType::quatToSo3(d_q);
@@ -217,7 +225,7 @@ optimizeSummary lioOptimization::updateIEKF(const icpOptions &cur_icp_options, v
         Eigen::Matrix<double, 17, 1> d_x_new = d_x;
         d_x_new.segment<3>(3) = J_k_so3 * d_so3;
         d_x_new.segment<2>(15) = J_k_s2 * d_g;
-
+        //* 更新协方差矩阵 
         Eigen::Matrix<double, 17, 17> covariance = eskf_pro->getCovariance();
 
         for (int j = 0; j < covariance.cols(); j++)
@@ -231,7 +239,8 @@ optimizeSummary lioOptimization::updateIEKF(const icpOptions &cur_icp_options, v
 
         for (int j = 0; j < covariance.rows(); j++)
             covariance.block<1, 2>(j, 15) = covariance.block<1, 2>(j, 15) * J_k_s2.transpose();
-
+        
+        //* 计算卡尔曼增益
         Eigen::Matrix<double, 17, 17> temp = (covariance/laser_point_cov).inverse();
         Eigen::Matrix<double, 6, 6> HTH = H_x.transpose() * H_x;
         temp.block<6, 6>(0, 0) += HTH;
@@ -242,6 +251,7 @@ optimizeSummary lioOptimization::updateIEKF(const icpOptions &cur_icp_options, v
         Eigen::Matrix<double, 17, 17> K_x = Eigen::Matrix<double, 17, 17>::Zero();
         K_x.block<17, 6>(0, 0) = temp_inv.block<17, 6>(0, 0) * HTH;
 
+        //! 状态更新公式！
         d_x = - K_h + (K_x - Eigen::Matrix<double, 17, 17>::Identity()) * d_x_new;
 
         Eigen::Vector3d g_before = eskf_pro->getGravity();
@@ -265,11 +275,12 @@ optimizeSummary lioOptimization::updateIEKF(const icpOptions &cur_icp_options, v
 
         if (p_frame->frame_id > 1 && 
             (d_x.head<3>()).norm() < cur_icp_options.threshold_translation_norm && 
-            AngularDistance(d_x.segment<3>(3)) < cur_icp_options.threshold_orientation_norm)
+            AngularDistance(d_x.segment<3>(3)) < cur_icp_options.threshold_orientation_norm)    //* 要求平移和旋转的更新量都小于阈值
         {
             converage = true;
         }
 
+        //* 协方差更新
         if (converage || i == max_num_iter - 1)
         {
             Eigen::Matrix<double, 17, 17> covariance_new = covariance;
@@ -323,9 +334,11 @@ Neighborhood lioOptimization::computeNeighborhoodDistribution(std::vector<global
         barycenter += point.getPosition();
     }
 
+    //* 计算点云的质心 barycenter
     barycenter /= (double) points.size();
     neighborhood.center = barycenter;
 
+    //* 计算点云的协方差矩阵
     Eigen::Matrix3d covariance_Matrix(Eigen::Matrix3d::Zero());
     for (auto &point: points) {
         for (int k = 0; k < 3; ++k)
@@ -333,18 +346,20 @@ Neighborhood lioOptimization::computeNeighborhoodDistribution(std::vector<global
                 covariance_Matrix(k, l) += (point.getPosition()(k) - barycenter(k)) *
                                            (point.getPosition()(l) - barycenter(l));
     }
+    //* 只计算上三角矩阵，利用协方差矩阵的对称性，补充下三角矩阵
     covariance_Matrix(1, 0) = covariance_Matrix(0, 1);
     covariance_Matrix(2, 0) = covariance_Matrix(0, 2);
     covariance_Matrix(2, 1) = covariance_Matrix(1, 2);
     neighborhood.covariance = covariance_Matrix;
+    //* 创建一个特征值求解器
     Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> es(covariance_Matrix);
-    Eigen::Vector3d normal(es.eigenvectors().col(0).normalized());
-    neighborhood.normal = normal;
+    Eigen::Vector3d normal(es.eigenvectors().col(0).normalized());    //* 获取最小特征值对应的特征向量，并归一化
+    neighborhood.normal = normal;   //* 记录最小特征值对应的单位向量
 
-    double sigma_1 = sqrt(std::abs(es.eigenvalues()[2]));
+    double sigma_1 = sqrt(std::abs(es.eigenvalues()[2]));    //* 最大特征值
     double sigma_2 = sqrt(std::abs(es.eigenvalues()[1]));
-    double sigma_3 = sqrt(std::abs(es.eigenvalues()[0]));
-    neighborhood.a2D = (sigma_2 - sigma_3) / sigma_1;
+    double sigma_3 = sqrt(std::abs(es.eigenvalues()[0]));    //* 最小特征值
+    neighborhood.a2D = (sigma_2 - sigma_3) / sigma_1;        //* a2D接近1 则为平面结构 
 
     if (neighborhood.a2D != neighborhood.a2D) {
         throw std::runtime_error("error");
@@ -366,16 +381,19 @@ using priority_queue_t = std::priority_queue<pair_distance_t, std::vector<pair_d
 std::vector<globalPoint> lioOptimization::searchNeighbors(voxelHashMap &map, const Eigen::Vector3d &point,
         int nb_voxels_visited, double size_voxel_map, int max_num_neighbors, int threshold_voxel_capacity, std::vector<voxel> *voxels)
 {
-
+    //* 分配邻居体素的数量
     if (voxels != nullptr)
         voxels->reserve(max_num_neighbors);
 
+    //* 计算查询点所在体素的索引
     short kx = static_cast<short>(point[0] / size_voxel_map);
     short ky = static_cast<short>(point[1] / size_voxel_map);
     short kz = static_cast<short>(point[2] / size_voxel_map);
 
+
     priority_queue_t priority_queue;
 
+    //* 获取当前点临近体素内最近的几个点
     voxel voxel_temp(kx, ky, kz);
     for (short kxx = kx - nb_voxels_visited; kxx < kx + nb_voxels_visited + 1; ++kxx) {
         for (short kyy = ky - nb_voxels_visited; kyy < ky + nb_voxels_visited + 1; ++kyy) {
@@ -387,15 +405,15 @@ std::vector<globalPoint> lioOptimization::searchNeighbors(voxelHashMap &map, con
                 auto search = map.find(voxel_temp);
                 if (search != map.end()) {
                     auto &voxel_block = search.value();
-                    if (voxel_block.NumPoints() < threshold_voxel_capacity)
+                    if (voxel_block.NumPoints() < threshold_voxel_capacity)    //* 如果邻域体素内的点过少，则跳过当前体素
                         continue;
-                    for (int i(0); i < voxel_block.NumPoints(); ++i) {
+                    for (int i(0); i < voxel_block.NumPoints(); ++i) { 
                         auto &neighbor = voxel_block.points[i];
                         double distance = (neighbor.getPosition() - point).norm();
                         if (priority_queue.size() == max_num_neighbors) {
                             if (distance < std::get<0>(priority_queue.top())) {
                                 priority_queue.pop();
-                                priority_queue.emplace(distance, neighbor, voxel_temp);
+                                priority_queue.emplace(distance, neighbor, voxel_temp);   //* 较大的元素排在顶部
                             }
                         } else
                             priority_queue.emplace(distance, neighbor, voxel_temp);
@@ -411,7 +429,7 @@ std::vector<globalPoint> lioOptimization::searchNeighbors(voxelHashMap &map, con
         voxels->resize(size);
     }
     for (auto i = 0; i < size; ++i) {
-        closest_neighbors[size - 1 - i] = std::get<1>(priority_queue.top());
+        closest_neighbors[size - 1 - i] = std::get<1>(priority_queue.top());   //* 将顺序反转，小的放在前面
         if (voxels != nullptr)
             (*voxels)[size - 1 - i] = std::get<2>(priority_queue.top());
         priority_queue.pop();
@@ -419,11 +437,13 @@ std::vector<globalPoint> lioOptimization::searchNeighbors(voxelHashMap &map, con
 
 
     return closest_neighbors;
-}
+} 
 
 optimizeSummary lioOptimization::optimize(cloudFrame *p_frame, const icpOptions &cur_icp_options, double sample_voxel_size)
 {
     std::vector<point3D> keypoints;
+
+    //* 对p_frame->point_frame进行降采样，每sample_voxel_size单位体素下采集一个点 将采样后存入keypoints中
     gridSampling(p_frame->point_frame, keypoints, sample_voxel_size);
 
     optimizeSummary optimize_summary;
@@ -437,9 +457,10 @@ optimizeSummary lioOptimization::optimize(cloudFrame *p_frame, const icpOptions 
     Eigen::Quaterniond q_end = p_frame->p_state->rotation;
     Eigen::Vector3d t_end = p_frame->p_state->translation;
     for (auto &point_temp: p_frame->point_frame) {
-        transformPoint(point_temp, q_end, t_end, R_imu_lidar, t_imu_lidar);
+        transformPoint(point_temp, q_end, t_end, R_imu_lidar, t_imu_lidar);   //* 将点云从激光雷达坐标系转换到世界坐标系
     }
  
+    //* 此时点云是以世界坐标系为中心
     detectDynamicLabel(cur_icp_options, voxel_map, p_frame);
 
     return optimize_summary;
@@ -447,6 +468,7 @@ optimizeSummary lioOptimization::optimize(cloudFrame *p_frame, const icpOptions 
 
 void lioOptimization::detectDynamicLabel(const icpOptions &cur_icp_options, voxelHashMap &voxel_map_temp, cloudFrame *p_frame)
 {
+    //* 初始化的时候相邻体素为2 在此之后相邻体素为1
     const short nb_voxels_visited = p_frame->frame_id < cur_icp_options.init_num_frames ? 2 : cur_icp_options.voxel_neighborhood;
     const int kMinNumNeighbors = cur_icp_options.min_number_neighbors;
     const int kThresholdCapacity = p_frame->frame_id < cur_icp_options.init_num_frames ? 1 : cur_icp_options.threshold_voxel_occupancy;
@@ -454,6 +476,7 @@ void lioOptimization::detectDynamicLabel(const icpOptions &cur_icp_options, voxe
 
     for (int i = 0; i < p_frame->point_frame.size(); i++)
     {
+        //* 首先过滤掉高超过3.2m的点
         if (p_frame->point_frame[i].raw_point.z() > 3.2)
         {
              continue;
@@ -498,6 +521,7 @@ void lioOptimization::detectDynamicLabel(const icpOptions &cur_icp_options, voxe
                     continue;
                 }
 
+                //* 当前帧id超过3 且当前点的距离大于30m 将其标定为未决定点
                 if (p_frame->point_frame[i].range > 30.0)
                 {
                     p_frame->point_frame[i].is_undecided = true;

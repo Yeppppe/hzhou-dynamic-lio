@@ -187,6 +187,7 @@ void subSampleFrame(std::vector<point3D> &frame, double size_voxel)
     }
 }
 
+//* 对frame进行降采样，每size_voxel_subsampling单位体素下采集一个点 将采样后存入keypoints中
 void gridSampling(const std::vector<point3D> &frame, std::vector<point3D> &keypoints, double size_voxel_subsampling)
 {
     keypoints.resize(0);
@@ -195,6 +196,7 @@ void gridSampling(const std::vector<point3D> &frame, std::vector<point3D> &keypo
     for (int i = 0; i < (int) frame_sub.size(); i++) {
         frame_sub[i] = frame[i];
     }
+    //* 降采样，没size_voxel_subsampling单位体素内保留1个点 再重新存入frame_sub中
     subSampleFrame(frame_sub, size_voxel_subsampling);
     keypoints.reserve(frame_sub.size());
     for (int i = 0; i < (int) frame_sub.size(); i++) {

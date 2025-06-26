@@ -254,19 +254,25 @@ void lioOptimization::addPointToMap(voxelHashMap &map, point3D &point3d, double 
 void lioOptimization::addPointsToMap(voxelHashMap &map, cloudFrame* p_frame, double voxel_size, int max_num_points_in_voxel, double min_distance_points, int min_num_points)
 {
     for (auto &point: p_frame->point_frame)
-    {
+    {   
+        //* 不添加动态点
         if (point.is_dynamic == false)
         {
             addPointToMap(map, point, voxel_size, max_num_points_in_voxel, min_distance_points, min_num_points, p_frame);
             
+            //* 不确定的点也不添加
             if (point.is_undecided == false)
+                //* 确定为point_vector_true添加到静态点的点集
                 addPointToTrueMap(voxel_map_true, point, voxel_size, max_num_points_in_voxel, min_distance_points, min_num_points);
         }
     }
+
+    //* 地图会包含稍远的点，但不会包含动态点
     publishCLoudWorld(pub_cloud_world, points_world, p_frame);
     points_world->clear();
 }
 
+//* 删除距离地图较远的点，维护地图紧凑型
 void lioOptimization::removePointsFarFromLocation(voxelHashMap &map, const Eigen::Vector3d &location, double distance)
 {
     std::vector<voxel> voxels_to_erase;
@@ -626,10 +632,11 @@ optimizeSummary lioOptimization::stateEstimation(cloudFrame *p_frame)
     if(p_frame->frame_id > 1)
     {
         bool good_enough_registration = false;
+                                                                    //* init_sample_voxel_size = 1.0   sample_voxel_size = 1.5
         double sample_voxel_size = p_frame->frame_id < options.init_num_frames ? options.init_sample_voxel_size : options.sample_voxel_size;
         double min_voxel_size = std::min(options.init_voxel_size, options.voxel_size);
 
-        optimize_summary = optimize(p_frame, optimize_options, sample_voxel_size);
+        optimize_summary = optimize(p_frame, optimize_options, sample_voxel_size);   //* 如果还在初始化阶段，体素网格=1 超过初始化阶段，体素网格 = 1.5
 
         if(!optimize_summary.success)
         {
@@ -656,7 +663,7 @@ optimizeSummary lioOptimization::stateEstimation(cloudFrame *p_frame)
     decidePoints(optimize_options, p_frame);
     addDecidedPointsToTrueMap(kSizeVoxelMap, kMaxNumPointsInVoxel, kMinDistancePoints);
 
-    const double kMaxDistance = options.max_distance;
+    const double kMaxDistance = options.max_distance;    //* 100m
     const Eigen::Vector3d location = p_frame->p_state->translation;
 
     removePointsFarFromLocation(voxel_map, location, kMaxDistance);
@@ -716,6 +723,7 @@ void lioOptimization::addPointToTrueMap(voxelHashMap &map, point3D &point3d, dou
     }
 }
 
+//* 进一步确定为决定点是动态点还是静态点
 void lioOptimization::decidePoints(const icpOptions &cur_icp_options, cloudFrame *p_frame)
 {
     const short nb_voxels_visited = p_frame->frame_id < cur_icp_options.init_num_frames ? 2 : cur_icp_options.voxel_neighborhood;
@@ -737,6 +745,8 @@ void lioOptimization::decidePoints(const icpOptions &cur_icp_options, cloudFrame
 
             voxelHashMap::iterator search = voxel_map_true.find(voxel(kx, ky, kz));
 
+            //* 在当前静态体素地图中找到了 当前体素点所在的体素，且体素里面点数大于5 
+            //* 此时查看当前体素地面点的比例，如果地面点大于0.1 就认为是动态点，否则认为是确定点
             if(search != voxel_map_true.end())
             {
                 auto &voxel_block = (search.value());
@@ -773,7 +783,7 @@ void lioOptimization::decidePoints(const icpOptions &cur_icp_options, cloudFrame
                     {
                         (*iter).is_undecided = false;
                         (*iter).is_dynamic = true;
-                        iter = points_undecided.erase(iter);
+                        iter = points_undecided.erase(iter);   //*
                         continue;
                     }
                 }
@@ -854,7 +864,7 @@ void lioOptimization::process(std::vector<point3D> &const_frame, double timestam
 
     int num_remove = 0;
 
-    if (initial_flag)
+    if (initial_flag)   //* 初始化过后只保留两帧
     {
         if (index_frame > 1)
         {
@@ -868,9 +878,9 @@ void lioOptimization::process(std::vector<point3D> &const_frame, double timestam
             assert(all_cloud_frame.size() == 2);
         }
     }
-    else
+    else      //* 初始化的时候保留10帧
     {
-        while (all_cloud_frame.size() > options.num_for_initialization)
+        while (all_cloud_frame.size() > options.num_for_initialization)   
         {
             recordSinglePose(all_cloud_frame[0]);
             all_cloud_frame[0]->release();
@@ -879,11 +889,12 @@ void lioOptimization::process(std::vector<point3D> &const_frame, double timestam
         }
     }
     
-
+    //* 更新帧id
     for(int i = 0; i < all_cloud_frame.size(); i++)
         all_cloud_frame[i]->id = all_cloud_frame[i]->id - num_remove;
 }
 
+//* 将当前点云帧信息记录到文件中
 void lioOptimization::recordSinglePose(cloudFrame *p_frame)
 {
     std::ofstream foutC(std::string(output_path + "/pose.txt"), std::ios::app);
@@ -969,10 +980,10 @@ void lioOptimization::addPointToPcl(pcl::PointCloud<pcl::PointXYZI>::Ptr pcl_poi
     cloudTemp.y = point.getPosition().y();
     cloudTemp.z = point.getPosition().z();
 
-    if (point.getLabel() == 0)
-        cloudTemp.intensity = 10;
+    if (point.getLabel() == 0)      //* point == 0 为地面点
+        cloudTemp.intensity = 10;  
     else
-        cloudTemp.intensity = 50/*50 * (cloudTemp.z - p_frame->p_state->translation.z())*/;
+        cloudTemp.intensity = 50/*50 * (cloudTemp.z - p_frame->p_state->translation.z())*/; 
     // cloudTemp.intensity = (double)point.getLabel();
     pcl_points->points.push_back(cloudTemp);
 }
@@ -1202,7 +1213,8 @@ int main(int argc, char** argv)
     return 0;
 }
 
-// loop closing
+// loop closing   
+//* 发布的是全部的点云地图
 void lioOptimization::pubLocalMap(cloudFrame* p_frame)
 {
     for (auto &point: p_frame->point_frame)
